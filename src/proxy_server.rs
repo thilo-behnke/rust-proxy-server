@@ -1,7 +1,7 @@
 pub mod proxy_server {
     use std::convert::Infallible;
     use std::fmt::Debug;
-    use std::sync::Arc;
+    use std::sync::{Arc};
     use std::time::{SystemTime, UNIX_EPOCH};
     use hyper::{Client, Server, Body, Method, Request, Response};
     use hyper::server::conn::AddrStream;
@@ -33,15 +33,15 @@ pub mod proxy_server {
             }
         }
 
-        pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            let make_svc = make_service_fn(|_: &AddrStream| {
-                async {
-                    Ok::<_, Infallible>(
-                        service_fn(|req: Request<Body>| {
-                            return handle_request(req);
-                        })
-                    )
-                }
+        pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let make_svc = make_service_fn(|_: &AddrStream| async {
+                Ok::<_, Infallible>(
+                    service_fn(|req: Request<Body>| async {
+                        let open_connections_mut = Arc::clone(&self.open_connections);
+                        let open_connections = open_connections_mut.lock().await;
+                        return handle_request(req).await;
+                    })
+                )
             });
 
             let addr = ([127, 0, 0, 1], 3000).into();
