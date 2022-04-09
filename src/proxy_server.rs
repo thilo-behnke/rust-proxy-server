@@ -1,23 +1,36 @@
 pub mod proxy_server {
     use std::convert::Infallible;
     use std::fmt::Debug;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use hyper::{Client, Server, Body, Method, Request, Response};
     use hyper::server::conn::AddrStream;
     use hyper::service::{make_service_fn, service_fn};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::TcpStream;
+    use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{Duration, sleep, timeout};
 
     const BUF_SIZE: usize = 1024;
     const TIMEOUT_THRESHOLD_SECS: u64 = 2;
 
-    pub struct ProxyServer {}
+
+    #[derive(Debug)]
+    pub struct Connection {
+        client: String,
+        host: String
+    }
+
+    pub struct ProxyServer {
+        open_connections: Arc<Mutex<Vec<Connection>>>
+    }
 
     impl ProxyServer {
         pub fn create() -> ProxyServer {
-            ProxyServer {}
+            ProxyServer {
+                open_connections: Arc::from(Mutex::from(vec![]))
+            }
         }
 
         pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -34,6 +47,18 @@ pub mod proxy_server {
             let addr = ([127, 0, 0, 1], 3000).into();
             let server = Server::bind(&addr).serve(make_svc);
             println!("Listening on http://{}", addr);
+
+            let open_connections_ref = Arc::clone(&self.open_connections);
+            tokio::task::spawn(async move {
+                loop {
+                    let open_connections = open_connections_ref.lock().await;
+                    println!("### open connections: {:?}", open_connections);
+                    sleep(Duration::from_millis(1000)).await;
+                }
+            });
+
+            println!("Monitor task started");
+
             server.await?;
 
             Ok(())
