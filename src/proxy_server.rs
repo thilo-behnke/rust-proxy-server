@@ -32,11 +32,8 @@ pub mod proxy_server {
             });
 
             let addr = ([127, 0, 0, 1], 3000).into();
-
             let server = Server::bind(&addr).serve(make_svc);
-
             println!("Listening on http://{}", addr);
-
             server.await?;
 
             Ok(())
@@ -47,7 +44,7 @@ pub mod proxy_server {
         mut req: Request<Body>
     ) -> Result<Response<Body>, hyper::Error> {
         let client = Client::new();
-        println!("Request: {:?}", req);
+        println!("### Request: {:?}", req);
         let res = match req.method() {
             &Method::GET => Ok(client.get(req.uri().clone()).await?),
             &Method::CONNECT => {
