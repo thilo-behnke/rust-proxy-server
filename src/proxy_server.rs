@@ -8,9 +8,10 @@ pub mod proxy_server {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::task::JoinHandle;
+    use tokio::time::{Duration, timeout};
 
     const BUF_SIZE: usize = 1024;
-    const TIMEOUT_THRESHOLD: usize = 10;
+    const TIMEOUT_THRESHOLD_SECS: u64 = 2;
 
     pub struct ProxyServer {}
 
@@ -65,9 +66,7 @@ pub mod proxy_server {
                             let client_handle = connect(format!("client -> host ({})", uri), client_reader, host_writer).await;
                             let host_handle = connect(format!("host ({}) -> client", uri), host_reader, client_writer).await;
 
-                            tokio::join!(client_handle);
-                            println!("[{}] Client is finished, closing host connection", uri);
-                            host_handle.abort();
+                            tokio::join!(client_handle, host_handle);
                             println!("[{}] connections are closed.", uri);
                         }
                         _ => eprintln!("failed to setup tunnel"),
@@ -93,12 +92,17 @@ pub mod proxy_server {
             let mut buf = [0u8; BUF_SIZE];
             loop {
                 println!("[{}] Reading...", name);
-                let read = pinned_reader.read(&mut buf).await;
-                match read {
+                let read = timeout(Duration::from_secs(TIMEOUT_THRESHOLD_SECS), pinned_reader.read(&mut buf)).await;
+                if let Err(e) = read {
+                    println!("Read timeout: {:?}", e);
+                    break;
+                }
+                let read_res = read.unwrap();
+                match read_res {
                     Ok(bytes_read) => {
                         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                         if bytes_read == 0 {
-                            if now - last_read >= TIMEOUT_THRESHOLD as u64 {
+                            if now - last_read >= TIMEOUT_THRESHOLD_SECS as u64 {
                                 println!("[{}] Connection timeout, closing connection.", name);
                                 break;
                             }
