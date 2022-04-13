@@ -11,15 +11,26 @@ pub mod proxy_server {
     use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
     use tokio::time::{Duration, sleep, timeout};
+    use uuid::Uuid;
 
     const BUF_SIZE: usize = 1024;
     const TIMEOUT_THRESHOLD_SECS: u64 = 2;
 
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Connection {
+        pub id: String,
         client: String,
         host: String
+    }
+
+    impl Connection {
+        pub fn create(client: String, host: String) -> Connection {
+            let id = Uuid::new_v4().to_string();
+            Connection {
+                id, client, host
+            }
+        }
     }
 
     pub struct ProxyServer {
@@ -34,14 +45,18 @@ pub mod proxy_server {
         }
 
         pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            let make_svc = make_service_fn(|_: &AddrStream| async {
-                Ok::<_, Infallible>(
-                    service_fn(|req: Request<Body>| async {
-                        let open_connections_mut = Arc::clone(&self.open_connections);
-                        let open_connections = open_connections_mut.lock().await;
-                        return handle_request(req).await;
-                    })
-                )
+            let make_svc = make_service_fn(|_: &AddrStream| {
+                let open_connections_mut = Arc::clone(&self.open_connections);
+                async move {
+                    Ok::<_, Infallible>(
+                        service_fn(move |req: Request<Body>| {
+                            let open_connections_mut = open_connections_mut.clone();
+                            async move {
+                                return handle_request(req, open_connections_mut).await;
+                            }
+                        })
+                    )
+                }
             });
 
             let addr = ([127, 0, 0, 1], 3000).into();
@@ -66,10 +81,15 @@ pub mod proxy_server {
     }
 
     async fn handle_request<'a>(
-        mut req: Request<Body>
+        mut req: Request<Body>,
+        mut open_connections_mut: Arc<Mutex<Vec<Connection>>>
     ) -> Result<Response<Body>, hyper::Error> {
         let client = Client::new();
         println!("### Request: {:?}", req);
+
+        let mut open_connections = open_connections_mut.lock().await;
+        let connection = Connection::create(req.uri().clone().to_string(), req.uri().clone().to_string());
+        open_connections.push(connection);
         let res = match req.method() {
             &Method::GET => Ok(client.get(req.uri().clone()).await?),
             &Method::CONNECT => {
