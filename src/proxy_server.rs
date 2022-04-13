@@ -1,4 +1,5 @@
 pub mod proxy_server {
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::fmt::Debug;
     use std::sync::{Arc};
@@ -34,13 +35,13 @@ pub mod proxy_server {
     }
 
     pub struct ProxyServer {
-        open_connections: Arc<Mutex<Vec<Connection>>>
+        open_connections: Arc<Mutex<HashMap<String, Connection>>>
     }
 
     impl ProxyServer {
         pub fn create() -> ProxyServer {
             ProxyServer {
-                open_connections: Arc::from(Mutex::from(vec![]))
+                open_connections: Arc::from(Mutex::from(HashMap::new()))
             }
         }
 
@@ -82,20 +83,21 @@ pub mod proxy_server {
 
     async fn handle_request<'a>(
         mut req: Request<Body>,
-        mut open_connections_mut: Arc<Mutex<Vec<Connection>>>
+        mut open_connections_mut: Arc<Mutex<HashMap<String, Connection>>>
     ) -> Result<Response<Body>, hyper::Error> {
         let client = Client::new();
         println!("### Request: {:?}", req);
 
-        let mut open_connections = open_connections_mut.lock().await;
-        let connection = Connection::create(req.uri().clone().to_string(), req.uri().clone().to_string());
-        open_connections.push(connection);
         let res = match req.method() {
             &Method::GET => Ok(client.get(req.uri().clone()).await?),
             &Method::CONNECT => {
                 let res = Response::new(Body::empty());
-
                 tokio::task::spawn(async move {
+                    let mut open_connections = open_connections_mut.lock().await;
+                    let connection = Connection::create(req.uri().clone().to_string(), req.uri().clone().to_string());
+                    let connection_id = connection.id.clone();
+                    open_connections.insert(connection_id.clone(), connection);
+
                     let uri = req.uri().to_string();
                     println!("[{}] Trying to use existing connection to client...", uri);
                     match (hyper::upgrade::on(&mut req).await, TcpStream::connect(&uri).await) {
@@ -109,6 +111,8 @@ pub mod proxy_server {
                             let host_handle = connect(format!("host ({}) -> client", uri), host_reader, client_writer).await;
 
                             tokio::join!(client_handle, host_handle);
+
+                            open_connections.remove(&connection_id.clone());
                             println!("[{}] connections are closed.", uri);
                         }
                         _ => eprintln!("failed to setup tunnel"),
