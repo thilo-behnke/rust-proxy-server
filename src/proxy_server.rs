@@ -2,6 +2,7 @@ pub mod proxy_server {
     use std::collections::HashMap;
     use std::convert::Infallible;
     use std::fmt::Debug;
+    use std::net::SocketAddr;
     use std::sync::{Arc};
     use std::time::{SystemTime, UNIX_EPOCH};
     use hyper::{Client, Server, Body, Method, Request, Response};
@@ -46,14 +47,16 @@ pub mod proxy_server {
         }
 
         pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            let make_svc = make_service_fn(|_: &AddrStream| {
+            let make_svc = make_service_fn(|socket: &AddrStream| {
                 let open_connections_mut = Arc::clone(&self.open_connections);
+                let client_addr = Arc::new(socket.remote_addr().to_string());
                 async move {
                     Ok::<_, Infallible>(
                         service_fn(move |req: Request<Body>| {
                             let open_connections_mut = open_connections_mut.clone();
+                            let client_addr = client_addr.clone();
                             async move {
-                                return handle_request(req, open_connections_mut).await;
+                                return handle_request(client_addr, req, open_connections_mut).await;
                             }
                         })
                     )
@@ -82,6 +85,7 @@ pub mod proxy_server {
     }
 
     async fn handle_request<'a>(
+        client_address: Arc<String>,
         mut req: Request<Body>,
         mut open_connections_mut: Arc<Mutex<HashMap<String, Connection>>>
     ) -> Result<Response<Body>, hyper::Error> {
@@ -95,7 +99,7 @@ pub mod proxy_server {
 
                 let mut open_connections_clone = open_connections_mut.clone();
                 let mut open_connections = open_connections_clone.lock().await;
-                let connection = Connection::create(req.uri().clone().to_string(), req.uri().clone().to_string());
+                let connection = Connection::create(client_address.to_string(), req.uri().clone().to_string());
                 let connection_id = connection.id.clone();
                 open_connections.insert(connection_id.clone(), connection);
                 // drop(open_connections);
