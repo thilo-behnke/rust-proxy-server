@@ -92,12 +92,15 @@ pub mod proxy_server {
             &Method::GET => Ok(client.get(req.uri().clone()).await?),
             &Method::CONNECT => {
                 let res = Response::new(Body::empty());
-                tokio::task::spawn(async move {
-                    let mut open_connections = open_connections_mut.lock().await;
-                    let connection = Connection::create(req.uri().clone().to_string(), req.uri().clone().to_string());
-                    let connection_id = connection.id.clone();
-                    open_connections.insert(connection_id.clone(), connection);
 
+                let mut open_connections_clone = open_connections_mut.clone();
+                let mut open_connections = open_connections_clone.lock().await;
+                let connection = Connection::create(req.uri().clone().to_string(), req.uri().clone().to_string());
+                let connection_id = connection.id.clone();
+                open_connections.insert(connection_id.clone(), connection);
+                // drop(open_connections);
+
+                tokio::task::spawn(async move {
                     let uri = req.uri().to_string();
                     println!("[{}] Trying to use existing connection to client...", uri);
                     match (hyper::upgrade::on(&mut req).await, TcpStream::connect(&uri).await) {
@@ -112,6 +115,8 @@ pub mod proxy_server {
 
                             tokio::join!(client_handle, host_handle);
 
+                            let mut open_connections_clone = open_connections_mut.clone();
+                            let mut open_connections = open_connections_clone.lock().await;
                             open_connections.remove(&connection_id.clone());
                             println!("[{}] connections are closed.", uri);
                         }
@@ -137,7 +142,7 @@ pub mod proxy_server {
             let mut last_read: u64 = 0;
             let mut buf = [0u8; BUF_SIZE];
             loop {
-                println!("[{}] Reading...", name);
+                // println!("[{}] Reading...", name);
                 let read = timeout(Duration::from_secs(TIMEOUT_THRESHOLD_SECS), pinned_reader.read(&mut buf)).await;
                 if let Err(e) = read {
                     println!("Read timeout: {:?}", e);
