@@ -93,15 +93,23 @@ pub mod proxy_server {
         println!("### Request: {:?}", req);
 
         let res = match req.method() {
-            &Method::GET => Ok(client.get(req.uri().clone()).await?),
+            &Method::GET => {
+                let connection_id = add_connection(open_connections_mut.clone(), client_address, &req).await;
+                match client.get(req.uri().clone()).await {
+                    Ok(res) => {
+                        remove_connection(open_connections_mut.clone(), connection_id).await;
+                        Ok(res)
+                    },
+                    Err(e) => {
+                        remove_connection(open_connections_mut.clone(), connection_id).await;
+                        Err(e)
+                    }
+                }
+            },
             &Method::CONNECT => {
                 let res = Response::new(Body::empty());
 
-                let mut open_connections_clone = open_connections_mut.clone();
-                let mut open_connections = open_connections_clone.lock().await;
-                let connection = Connection::create(client_address.to_string(), req.uri().clone().to_string());
-                let connection_id = connection.id.clone();
-                open_connections.insert(connection_id.clone(), connection);
+                let connection_id = add_connection(open_connections_mut.clone(), client_address, &req).await;
 
                 tokio::task::spawn(async move {
                     let uri = req.uri().to_string();
@@ -118,9 +126,7 @@ pub mod proxy_server {
 
                             tokio::join!(client_handle, host_handle);
 
-                            let mut open_connections_clone = open_connections_mut.clone();
-                            let mut open_connections = open_connections_clone.lock().await;
-                            open_connections.remove(&connection_id.clone());
+                            remove_connection(open_connections_mut.clone(), connection_id).await;
                             println!("[{}] connections are closed.", uri);
                         }
                         _ => eprintln!("failed to setup tunnel"),
@@ -134,6 +140,19 @@ pub mod proxy_server {
         };
         println!("Response: {:?}", res);
         res
+    }
+
+    async fn add_connection(open_connections_mut: Arc<Mutex<HashMap<String, Connection>>>, client_address: SocketAddr, req: &Request<Body>) -> String {
+        let mut open_connections = open_connections_mut.lock().await;
+        let connection = Connection::create(client_address.to_string(), req.uri().clone().to_string());
+        let connection_id = connection.id.clone();
+        open_connections.insert(connection_id.clone(), connection);
+        connection_id
+    }
+
+    async fn remove_connection(open_connections_mut: Arc<Mutex<HashMap<String, Connection>>>, connection_id: String) {
+        let mut open_connections = open_connections_mut.lock().await;
+        open_connections.remove(&connection_id.clone());
     }
 
     async fn connect(name: String, reader: impl AsyncRead + Debug + Send + 'static, writer: impl AsyncWrite + Debug + Send + 'static) -> JoinHandle<()> {
