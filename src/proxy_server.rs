@@ -1,31 +1,63 @@
 pub mod proxy_server {
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::fmt::Debug;
+    use std::net::SocketAddr;
+    use std::sync::{Arc};
     use std::time::{SystemTime, UNIX_EPOCH};
     use hyper::{Client, Server, Body, Method, Request, Response};
     use hyper::server::conn::AddrStream;
     use hyper::service::{make_service_fn, service_fn};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::TcpStream;
+    use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{Duration, sleep, timeout};
+    use uuid::Uuid;
 
     const BUF_SIZE: usize = 1024;
     const TIMEOUT_THRESHOLD_SECS: u64 = 2;
 
-    pub struct ProxyServer {}
+
+    #[derive(Debug, Clone)]
+    pub struct Connection {
+        pub id: String,
+        client: String,
+        host: String
+    }
+
+    impl Connection {
+        pub fn create(client: String, host: String) -> Connection {
+            let id = Uuid::new_v4().to_string();
+            Connection {
+                id, client, host
+            }
+        }
+    }
+
+    pub struct ProxyServer {
+        open_connections: Arc<Mutex<HashMap<String, Connection>>>
+    }
 
     impl ProxyServer {
         pub fn create() -> ProxyServer {
-            ProxyServer {}
+            ProxyServer {
+                open_connections: Arc::from(Mutex::from(HashMap::new()))
+            }
         }
 
-        pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            let make_svc = make_service_fn(|_: &AddrStream| {
-                async {
+        pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let make_svc = make_service_fn(|socket: &AddrStream| {
+                let open_connections_mut = Arc::clone(&self.open_connections);
+                let client_addr = Arc::new(socket.remote_addr());
+                async move {
                     Ok::<_, Infallible>(
-                        service_fn(|req: Request<Body>| {
-                            return handle_request(req);
+                        service_fn(move |req: Request<Body>| {
+                            let open_connections_mut = open_connections_mut.clone();
+                            let client_addr = client_addr.clone();
+                            async move {
+                                return handle_request(*client_addr, req, open_connections_mut).await;
+                            }
                         })
                     )
                 }
@@ -34,6 +66,18 @@ pub mod proxy_server {
             let addr = ([127, 0, 0, 1], 3000).into();
             let server = Server::bind(&addr).serve(make_svc);
             println!("Listening on http://{}", addr);
+
+            let open_connections_ref = Arc::clone(&self.open_connections);
+            tokio::task::spawn(async move {
+                loop {
+                    let open_connections = open_connections_ref.lock().await;
+                    println!("### open connections: {:?}", open_connections);
+                    sleep(Duration::from_millis(1000)).await;
+                }
+            });
+
+            println!("Monitor task started");
+
             server.await?;
 
             Ok(())
@@ -41,14 +85,31 @@ pub mod proxy_server {
     }
 
     async fn handle_request<'a>(
-        mut req: Request<Body>
+        client_address: SocketAddr,
+        mut req: Request<Body>,
+        open_connections_mut: Arc<Mutex<HashMap<String, Connection>>>
     ) -> Result<Response<Body>, hyper::Error> {
         let client = Client::new();
         println!("### Request: {:?}", req);
+
         let res = match req.method() {
-            &Method::GET => Ok(client.get(req.uri().clone()).await?),
+            &Method::GET => {
+                let connection_id = add_connection(open_connections_mut.clone(), client_address, &req).await;
+                match client.get(req.uri().clone()).await {
+                    Ok(res) => {
+                        remove_connection(open_connections_mut.clone(), connection_id).await;
+                        Ok(res)
+                    },
+                    Err(e) => {
+                        remove_connection(open_connections_mut.clone(), connection_id).await;
+                        Err(e)
+                    }
+                }
+            },
             &Method::CONNECT => {
                 let res = Response::new(Body::empty());
+
+                let connection_id = add_connection(open_connections_mut.clone(), client_address, &req).await;
 
                 tokio::task::spawn(async move {
                     let uri = req.uri().to_string();
@@ -64,6 +125,8 @@ pub mod proxy_server {
                             let host_handle = connect(format!("host ({}) -> client", uri), host_reader, client_writer).await;
 
                             tokio::join!(client_handle, host_handle);
+
+                            remove_connection(open_connections_mut.clone(), connection_id).await;
                             println!("[{}] connections are closed.", uri);
                         }
                         _ => eprintln!("failed to setup tunnel"),
@@ -75,8 +138,20 @@ pub mod proxy_server {
             }
             m => panic!("Method not supported: {:?}", m),
         };
-        println!("Response: {:?}", res);
         res
+    }
+
+    async fn add_connection(open_connections_mut: Arc<Mutex<HashMap<String, Connection>>>, client_address: SocketAddr, req: &Request<Body>) -> String {
+        let mut open_connections = open_connections_mut.lock().await;
+        let connection = Connection::create(client_address.to_string(), req.uri().clone().to_string());
+        let connection_id = connection.id.clone();
+        open_connections.insert(connection_id.clone(), connection);
+        connection_id
+    }
+
+    async fn remove_connection(open_connections_mut: Arc<Mutex<HashMap<String, Connection>>>, connection_id: String) {
+        let mut open_connections = open_connections_mut.lock().await;
+        open_connections.remove(&connection_id.clone());
     }
 
     async fn connect(name: String, reader: impl AsyncRead + Debug + Send + 'static, writer: impl AsyncWrite + Debug + Send + 'static) -> JoinHandle<()> {
@@ -88,7 +163,7 @@ pub mod proxy_server {
             let mut last_read: u64 = 0;
             let mut buf = [0u8; BUF_SIZE];
             loop {
-                println!("[{}] Reading...", name);
+                // println!("[{}] Reading...", name);
                 let read = timeout(Duration::from_secs(TIMEOUT_THRESHOLD_SECS), pinned_reader.read(&mut buf)).await;
                 if let Err(e) = read {
                     println!("Read timeout: {:?}", e);
